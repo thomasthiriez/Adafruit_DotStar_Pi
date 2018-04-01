@@ -245,7 +245,7 @@ static PyObject *DotStar_new(
 			self->pBuf       = NULL;   // alloc'd on 1st use
 			self->dataPin    = dPin;
 			self->clockPin   = cPin;
-			self->brightness = 0;
+			self->brightness = 255;
 			self->rOffset    = rOffset;
 			self->gOffset    = gOffset;
 			self->bOffset    = bOffset;
@@ -382,13 +382,7 @@ static PyObject *setBrightness(DotStarObject *self, PyObject *arg) {
 	uint8_t b;
         if(!PyArg_ParseTuple(arg, "b", &b)) return NULL;
 
-	// Stored brightness value is different than what's passed.  This
-	// optimizes the actual scaling math later, allowing a fast multiply
-	// and taking the MSB.  'brightness' is a uint8_t, adding 1 here may
-	// (intentionally) roll over...so 0 = max brightness (color values
-	// are interpreted literally; no scaling), 1 = min brightness (off),
-	// 255 = just below max brightness.
-	self->brightness = b + 1;
+	self->brightness = b;
 
 	Py_INCREF(Py_None);
 	return Py_None;
@@ -503,12 +497,18 @@ static PyObject *show(DotStarObject *self, PyObject *arg) {
 		raw_write(self, buf.buf, buf.len);
 		PyBuffer_Release(&buf);
 	} else { // Write object's pixel buffer
-		if(self->brightness == 0) { // Send raw (no scaling)
+		if(self->brightness == 255) { // Send raw (no scaling)
 			raw_write(self, self->pixels, self->numLEDs * 4);
 		} else { // Adjust brightness during write
 			uint32_t i;
 			uint8_t *ptr   = self->pixels;
-			uint16_t scale = self->brightness;
+			uint16_t scale = 0;
+
+			int bri = (int)ceil(self->brightness*31/255.0);
+			uint8_t msb = 0xE0 | bri;
+			if (bri)
+			   scale = self->brightness*256/(bri*255/31);
+
 			if(self->fd >= 0) { // Hardware SPI
 				// Allocate pBuf if using hardware
 				// SPI and not previously alloc'd
@@ -526,6 +526,7 @@ static PyObject *show(DotStarObject *self, PyObject *arg) {
 					uint8_t *pb = self->pBuf;
 					for(i=0; i<self->numLEDs;
 					  i++, ptr += 4, pb += 4) {
+						pb[0] = msb;
 						pb[1] = (ptr[1] * scale) >> 8;
 						pb[2] = (ptr[2] * scale) >> 8;
 						pb[3] = (ptr[3] * scale) >> 8;
@@ -542,7 +543,7 @@ static PyObject *show(DotStarObject *self, PyObject *arg) {
 					i    = 4;
 					while(i--) (void)write(self->fd, x, 1);
 					// Payload:
-					x[0] = 0xFF;
+					x[0] = msb;
 					for(i=0; i<self->numLEDs;
 					  i++, ptr += 4) {
 						x[1] = (ptr[1] * scale) >> 8;
@@ -564,7 +565,7 @@ static PyObject *show(DotStarObject *self, PyObject *arg) {
 				bit      = 32;
 				while(bit--) clockPulse(self);
 				for(i=0; i<self->numLEDs; i++, ptr += 4) {
-					word = 0xFF000000                   |
+					word = msb << 24                    |
 					 (((ptr[1] * scale) & 0xFF00) << 8) |
 					 ( (ptr[2] * scale) & 0xFF00      ) |
 					 ( (ptr[3] * scale)           >> 8);
@@ -623,7 +624,7 @@ static PyObject *numPixels(DotStarObject *self) {
 
 // Return strip brightness
 static PyObject *getBrightness(DotStarObject *self) {
-	return Py_BuildValue("H", (uint8_t)(self->brightness - 1));
+	return Py_BuildValue("H", (uint8_t)(self->brightness));
 }
 
 // DON'T USE THIS.  One of those "parity with Arduino library" methods,
